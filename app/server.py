@@ -126,16 +126,18 @@ app = mcp.streamable_http_app()
 app.add_middleware(BearerAuthMiddleware)
 
 
-@app.route("/health", methods=["GET"])
 async def health(request: Request):
     return JSONResponse({"status": "ok", "service": SERVICE_NAME, "mcp_path": "/mcp"})
 
 
-@app.route("/", methods=["GET"])
 async def root(request: Request):
     return PlainTextResponse(
         f"{SERVICE_NAME} is running. MCP endpoint: /mcp; health endpoint: /health"
     )
+
+
+app.add_route("/health", health, methods=["GET"])
+app.add_route("/", root, methods=["GET"])
 
 
 if __name__ == "__main__":
