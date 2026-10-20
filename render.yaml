@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: render-termux-mcp
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: python -m app.server
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: MCP_BEARER_TOKEN
+        sync: false
+      - key: TERMUX_BRIDGE_URL
+        sync: false
+      - key: TERMUX_BRIDGE_TOKEN
+        sync: false
+      - key: BRIDGE_TIMEOUT_SECONDS
+        value: "8"
