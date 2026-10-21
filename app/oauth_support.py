@@ -8,7 +8,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://rdc-mcp-server.onrender.com").rstrip("/")
+BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://rdc-mcp-server-1.onrender.com").rstrip("/")
 RESOURCE = BASE_URL + "/mcp"
 MASTER_SECRET = os.getenv("MCP_BEARER_TOKEN", "")
 _codes: dict[str, dict[str, Any]] = {}

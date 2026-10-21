@@ -4,6 +4,7 @@ import os
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from mcp.server.fastmcp import FastMCP
@@ -29,10 +30,16 @@ APPROVED_OPERATIONS = {
     "system_status": {"description": "Read basic system status from the bridge, if implemented."},
 }
 
+PUBLIC_BASE_URL = os.getenv(
+    "PUBLIC_BASE_URL",
+    "https://rdc-mcp-server-1.onrender.com",
+).rstrip("/")
+PUBLIC_HOST = urlparse(PUBLIC_BASE_URL).hostname or "rdc-mcp-server-1.onrender.com"
+
 transport_security = TransportSecuritySettings(
     enable_dns_rebinding_protection=True,
-    allowed_hosts=["rdc-mcp-server.onrender.com", "rdc-mcp-server.onrender.com:*"],
-    allowed_origins=["https://rdc-mcp-server.onrender.com"],
+    allowed_hosts=[PUBLIC_HOST, f"{PUBLIC_HOST}:*"],
+    allowed_origins=[PUBLIC_BASE_URL],
 )
 mcp = FastMCP(
     SERVICE_NAME,
