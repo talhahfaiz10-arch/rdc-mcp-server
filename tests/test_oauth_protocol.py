@@ -94,3 +94,34 @@ def test_authorize_rejects_wrong_resource_with_issuer_bound_error():
     assert query["error"] == ["invalid_target"]
     assert query["iss"] == [oauth_support.BASE_URL]
     assert query["state"] == ["s"]
+
+
+def test_mcp_tool_call_returns_oauth_metadata_challenge():
+    client = TestClient(app, follow_redirects=False)
+    response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 41, "method": "tools/call",
+        "params": {"name": "termux_system_status", "arguments": {}}})
+    assert response.status_code == 200
+    result = response.json()["result"]
+    assert result["isError"] is True
+    challenges = result["_meta"]["mcp/www_authenticate"]
+    assert len(challenges) == 1
+    assert "resource_metadata=" in challenges[0]
+    assert 'error="invalid_token"' in challenges[0]
+
+
+def test_mcp_tool_list_declares_per_tool_security_schemes():
+    import asyncio
+    from app.server import _list_tools_with_security_schemes
+
+    tools = asyncio.run(_list_tools_with_security_schemes())
+    by_name = {tool.name: tool.model_dump(by_alias=True) for tool in tools}
+    assert by_name["termux_system_status"]["securitySchemes"] == [{"type": "oauth2", "scopes": ["mcp:tools"]}]
+    assert by_name["termux_bridge_health"]["securitySchemes"] == [{"type": "oauth2", "scopes": ["mcp:tools"]}]
+    assert by_name["termux_approved_operations"]["securitySchemes"] == [{"type": "noauth"}]
+
+
+def test_master_secret_is_not_accepted_as_a_bearer_access_token():
+    client = TestClient(app, follow_redirects=False)
+    response = client.get("/mcp", headers={"Authorization": f"Bearer {oauth_support.MASTER_SECRET}"})
+    assert response.status_code == 401
+    assert "WWW-Authenticate" in response.headers

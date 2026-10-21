@@ -44,16 +44,50 @@ def valid_redirect(uri: str) -> bool:
 class OAuthBearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path.rstrip("/") or "/"
-        public = {"/", "/health", "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"}
+        public = {"/", "/health", "/.well-known/oauth-protected-resource",
+                  "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server",
+                  "/register", "/authorize", "/token"}
         if path in public or path in ("/relay/agent/next", "/relay/agent/result"):
             return await call_next(request)
-        h = request.headers.get("authorization", "")
-        token = h[7:].strip() if h.lower().startswith("bearer ") else ""
-        # Keep existing private token available for manual recovery, too.
-        legacy = bool(MASTER_SECRET) and hmac.compare_digest(token, MASTER_SECRET)
-        if not (legacy or valid_token(token)):
-            return JSONResponse({"error":"unauthorized"}, status_code=401, headers={"WWW-Authenticate": f'Bearer resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource/mcp"'})
-        return await call_next(request)
+
+        header = request.headers.get("authorization", "")
+        token = header[7:].strip() if header.lower().startswith("bearer ") else ""
+        if MASTER_SECRET and valid_token(token):
+            return await call_next(request)
+
+        challenge = (f'Bearer resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource/mcp", '
+                     'error="invalid_token", error_description="Authorize this MCP server to use protected tools"')
+
+        # Allow protocol initialization and tool discovery without credentials so
+        # ChatGPT can read the per-tool OAuth securitySchemes before linking.
+        if path == "/mcp" and request.method == "POST":
+            try:
+                rpc = await request.json()
+            except Exception:
+                rpc = None
+            if isinstance(rpc, dict):
+                method = rpc.get("method")
+                if method in {"initialize", "notifications/initialized", "tools/list", "ping"}:
+                    return await call_next(request)
+                if method == "tools/call":
+                    params = rpc.get("params") if isinstance(rpc.get("params"), dict) else {}
+                    if params.get("name") == "termux_approved_operations":
+                        return await call_next(request)
+                    if "id" in rpc:
+                        return JSONResponse({
+                            "jsonrpc": "2.0",
+                            "id": rpc["id"],
+                            "result": {
+                                "content": [{"type": "text", "text": "Authentication required. Authorize this MCP server to use protected Termux tools."}],
+                                "_meta": {"mcp/www_authenticate": [challenge]},
+                                "isError": True,
+                            },
+                        }, headers={"Cache-Control": "no-store"})
+
+        return JSONResponse(
+            {"error": "unauthorized"}, status_code=401,
+            headers={"WWW-Authenticate": f'Bearer resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource/mcp"'},
+        )
 
 async def protected_resource(request: Request):
     return JSONResponse({"resource":RESOURCE,"authorization_servers":[BASE_URL],"scopes_supported":["mcp:tools"],"bearer_methods_supported":["header"]})

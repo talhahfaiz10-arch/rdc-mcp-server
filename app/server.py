@@ -140,6 +140,23 @@ async def termux_approved_operations() -> dict[str, Any]:
     }
 
 
+# Advertise OpenAI's per-tool OAuth contract in the tools/list payload. The
+# Python MCP SDK currently allows extension fields on Tool models, so this stays
+# on the wire as a top-level securitySchemes property.
+_original_list_tools = mcp.list_tools
+
+
+async def _list_tools_with_security_schemes():
+    tools = await _original_list_tools()
+    for tool in tools:
+        scopes = [] if tool.name == "termux_approved_operations" else ["mcp:tools"]
+        scheme = {"type": "noauth"} if not scopes else {"type": "oauth2", "scopes": scopes}
+        tool.securitySchemes = [scheme]
+    return tools
+
+
+mcp._mcp_server.list_tools()(_list_tools_with_security_schemes)
+
 # Streamable HTTP endpoint is provided by the MCP SDK at /mcp.
 app = mcp.streamable_http_app()
 from app.oauth_support import install_oauth
