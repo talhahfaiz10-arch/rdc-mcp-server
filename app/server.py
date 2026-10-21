@@ -42,28 +42,6 @@ mcp = FastMCP(
 )
 
 
-class BearerAuthMiddleware(BaseHTTPMiddleware):
-    async def dispatch(self, request: Request, call_next):
-        # Render health checks can access this endpoint without credentials.
-        if request.url.path.rstrip("/") == "/health":
-            return await call_next(request)
-
-        # Agent routes authenticate independently with TERMUX_BRIDGE_TOKEN.
-        if request.url.path in ("/relay/agent/next", "/relay/agent/result"):
-            return await call_next(request)
-
-        # Protect the MCP endpoint and every other application route by default.
-        supplied = request.headers.get("authorization", "")
-        expected = f"Bearer {MCP_BEARER_TOKEN}" if MCP_BEARER_TOKEN else ""
-        if not expected or not hmac.compare_digest(supplied, expected):
-            return JSONResponse(
-                {"error": "unauthorized", "message": "A valid bearer token is required."},
-                status_code=401,
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return await call_next(request)
-
-
 async def _bridge_request(path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
     if not TERMUX_BRIDGE_URL:
         return {
@@ -157,7 +135,8 @@ async def termux_approved_operations() -> dict[str, Any]:
 
 # Streamable HTTP endpoint is provided by the MCP SDK at /mcp.
 app = mcp.streamable_http_app()
-app.add_middleware(BearerAuthMiddleware)
+from app.oauth_support import install_oauth
+install_oauth(app)
 
 
 
