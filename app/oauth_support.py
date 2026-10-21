@@ -11,7 +11,6 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 BASE_URL = os.getenv("PUBLIC_BASE_URL", "https://rdc-mcp-server.onrender.com").rstrip("/")
 RESOURCE = BASE_URL + "/mcp"
 MASTER_SECRET = os.getenv("MCP_BEARER_TOKEN", "")
-_clients: dict[str, dict[str, Any]] = {}
 _codes: dict[str, dict[str, Any]] = {}
 TTL = 3600
 
@@ -68,9 +67,31 @@ async def register(request: Request):
     uris = b.get("redirect_uris")
     if not isinstance(uris,list) or not uris or not all(isinstance(u,str) and valid_redirect(u) for u in uris):
         return JSONResponse({"error":"invalid_redirect_uri"}, status_code=400)
-    cid = secrets.token_urlsafe(24)
-    _clients[cid] = {"name":str(b.get("client_name","MCP client"))[:100],"uris":uris}
-    return JSONResponse({"client_id":cid,"client_name":_clients[cid]["name"],"redirect_uris":uris,"grant_types":["authorization_code"],"response_types":["code"],"token_endpoint_auth_method":"none"},status_code=201)
+    if not MASTER_SECRET:
+        return JSONResponse({"error":"server_misconfigured"}, status_code=500)
+    name = str(b.get("client_name", "MCP client"))[:100]
+    body = enc(json.dumps({"iss": BASE_URL, "name": name, "uris": uris}, separators=(",", ":"), sort_keys=True).encode())
+    sig = enc(hmac.new(MASTER_SECRET.encode(), body.encode(), hashlib.sha256).digest())
+    cid = "dyn." + body + "." + sig
+    return JSONResponse({"client_id":cid,"client_name":name,"redirect_uris":uris,"grant_types":["authorization_code"],"response_types":["code"],"token_endpoint_auth_method":"none"},status_code=201)
+
+def client_info(cid: str) -> dict[str, Any] | None:
+    # Signed, stateless dynamic registration survives Render restarts/redeploys.
+    try:
+        prefix, body, sig = cid.split(".", 2)
+        if prefix != "dyn" or not MASTER_SECRET:
+            return None
+        expected = enc(hmac.new(MASTER_SECRET.encode(), body.encode(), hashlib.sha256).digest())
+        if not hmac.compare_digest(sig, expected):
+            return None
+        payload = json.loads(dec(body))
+        if payload.get("iss") != BASE_URL or not isinstance(payload.get("uris"), list):
+            return None
+        if not all(isinstance(u, str) and valid_redirect(u) for u in payload["uris"]):
+            return None
+        return {"name": str(payload.get("name", "MCP client"))[:100], "uris": payload["uris"]}
+    except Exception:
+        return None
 
 def safe(s: str) -> str:
     return s.replace("&","&amp;").replace('"',"&quot;").replace("<","&lt;").replace(">","&gt;")
@@ -81,7 +102,7 @@ async def authorize(request: Request):
     else:
         v = {k: vals[0] for k, vals in parse_qs((await request.body()).decode(),keep_blank_values=True).items()}
     cid, uri = str(v.get("client_id","")), str(v.get("redirect_uri",""))
-    c = _clients.get(cid)
+    c = client_info(cid)
     if not c or uri not in c["uris"]: return HTMLResponse("<h2>Invalid client or redirect URI</h2>",status_code=400)
     if request.method == "GET":
         hidden = "".join(f'<input type="hidden" name="{k}" value="{safe(str(v.get(k,"")))}">' for k in ("client_id","redirect_uri","state","code_challenge","code_challenge_method","resource","scope","response_type"))
