@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
@@ -145,7 +146,14 @@ async def termux_approved_operations() -> dict[str, Any]:
 
 
 # Streamable HTTP endpoint is provided by the MCP SDK at /mcp.
-app = mcp.streamable_http_app()
+# Render terminates public HTTPS and forwards the service Host header; explicitly
+# allow only this service's public hostname rather than the SDK localhost default.
+transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["rdc-mcp-server.onrender.com", "rdc-mcp-server.onrender.com:*"],
+    allowed_origins=["https://rdc-mcp-server.onrender.com"],
+)
+app = mcp.streamable_http_app(transport_security=transport_security)
 app.add_middleware(BearerAuthMiddleware)
 
 
