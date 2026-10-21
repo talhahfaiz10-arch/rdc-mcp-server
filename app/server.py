@@ -1,6 +1,8 @@
 import asyncio
 import hmac
 import os
+import time
+import uuid
 from typing import Any
 
 import httpx
@@ -14,6 +16,11 @@ MCP_BEARER_TOKEN = os.getenv("MCP_BEARER_TOKEN", "")
 TERMUX_BRIDGE_URL = os.getenv("TERMUX_BRIDGE_URL", "").rstrip("/")
 TERMUX_BRIDGE_TOKEN = os.getenv("TERMUX_BRIDGE_TOKEN", "")
 BRIDGE_TIMEOUT_SECONDS = float(os.getenv("BRIDGE_TIMEOUT_SECONDS", "8"))
+RELAY_WAIT_SECONDS = float(os.getenv("RELAY_WAIT_SECONDS", "25"))
+# In-memory queue is appropriate for this single-instance starter relay. Jobs are
+# deliberately limited to named, read-only operations; never accept shell text.
+_relay_jobs: asyncio.Queue = asyncio.Queue()
+_relay_pending: dict[str, asyncio.Future] = {}
 
 # Keep this list narrow. These are named operations, not arbitrary shell input.
 APPROVED_OPERATIONS = {
@@ -28,6 +35,10 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # Render health checks can access this endpoint without credentials.
         if request.url.path.rstrip("/") == "/health":
+            return await call_next(request)
+
+        # Agent routes authenticate independently with TERMUX_BRIDGE_TOKEN.
+        if request.url.path in ("/relay/agent/next", "/relay/agent/result"):
             return await call_next(request)
 
         # Protect the MCP endpoint and every other application route by default.
@@ -88,12 +99,11 @@ async def _bridge_request(path: str, payload: dict[str, Any] | None = None) -> d
 @mcp.tool()
 async def termux_bridge_health() -> dict[str, Any]:
     """Check the configured Termux bridge's health. Does not execute shell commands."""
-    result = await _bridge_request("/health")
-    return {
-        "service": SERVICE_NAME,
-        "bridge_configured": bool(TERMUX_BRIDGE_URL),
-        **result,
-    }
+    if TERMUX_BRIDGE_URL:
+        result = await _bridge_request("/health")
+        return {"service": SERVICE_NAME, "bridge_configured": True, "route": "direct", **result}
+    return {"service": SERVICE_NAME, "bridge_configured": bool(TERMUX_BRIDGE_TOKEN),
+            "route": "render_polling_relay", "message": "Termux agent must be online to process requests."}
 
 
 @mcp.tool()
@@ -105,9 +115,22 @@ async def termux_system_status() -> dict[str, Any]:
     """
     if "system_status" not in APPROVED_OPERATIONS:
         return {"ok": False, "error": "operation_not_approved"}
-    return await _bridge_request(
-        "/approved-operation", {"operation": "system_status"}
-    )
+    if TERMUX_BRIDGE_URL:
+        return await _bridge_request("/approved-operation", {"operation": "system_status"})
+    if not TERMUX_BRIDGE_TOKEN:
+        return {"ok": False, "error": "relay_not_configured", "message": "Set TERMUX_BRIDGE_TOKEN in Render."}
+    job_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+    future = loop.create_future()
+    _relay_pending[job_id] = future
+    await _relay_jobs.put({"job_id": job_id, "operation": "system_status"})
+    try:
+        result = await asyncio.wait_for(future, timeout=RELAY_WAIT_SECONDS)
+        return {"ok": True, "route": "render_polling_relay", "result": result}
+    except asyncio.TimeoutError:
+        return {"ok": False, "error": "termux_agent_timeout", "message": "No Termux agent answered in time. Check the agent process and network."}
+    finally:
+        _relay_pending.pop(job_id, None)
 
 
 @mcp.tool()
@@ -126,6 +149,43 @@ app = mcp.streamable_http_app()
 app.add_middleware(BearerAuthMiddleware)
 
 
+
+
+async def _agent_authorized(request: Request) -> bool:
+    supplied = request.headers.get("authorization", "")
+    expected = f"Bearer {TERMUX_BRIDGE_TOKEN}" if TERMUX_BRIDGE_TOKEN else ""
+    return bool(expected) and hmac.compare_digest(supplied, expected)
+
+
+async def relay_next(request: Request):
+    if not await _agent_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    # Short-poll keeps the agent simple and works over outbound HTTPS only.
+    try:
+        job = await asyncio.wait_for(_relay_jobs.get(), timeout=18)
+        return JSONResponse({"job": job})
+    except asyncio.TimeoutError:
+        return JSONResponse({"job": None})
+
+
+async def relay_result(request: Request):
+    if not await _agent_authorized(request):
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid_json"}, status_code=400)
+    job_id = body.get("job_id")
+    result = body.get("result")
+    if not isinstance(job_id, str) or not isinstance(result, dict):
+        return JSONResponse({"error": "job_id_and_result_required"}, status_code=400)
+    future = _relay_pending.get(job_id)
+    if future is None or future.done():
+        return JSONResponse({"accepted": False, "reason": "job_not_pending"}, status_code=404)
+    future.set_result(result)
+    return JSONResponse({"accepted": True})
+
+
 async def health(request: Request):
     return JSONResponse({"status": "ok", "service": SERVICE_NAME, "mcp_path": "/mcp"})
 
@@ -138,6 +198,8 @@ async def root(request: Request):
 
 app.add_route("/health", health, methods=["GET"])
 app.add_route("/", root, methods=["GET"])
+app.add_route("/relay/agent/next", relay_next, methods=["GET"])
+app.add_route("/relay/agent/result", relay_result, methods=["POST"])
 
 
 if __name__ == "__main__":
