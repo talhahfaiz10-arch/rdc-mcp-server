@@ -29,7 +29,17 @@ APPROVED_OPERATIONS = {
     "system_status": {"description": "Read basic system status from the bridge, if implemented."},
 }
 
-mcp = FastMCP(SERVICE_NAME, stateless_http=True, json_response=True)
+transport_security = TransportSecuritySettings(
+    enable_dns_rebinding_protection=True,
+    allowed_hosts=["rdc-mcp-server.onrender.com", "rdc-mcp-server.onrender.com:*"],
+    allowed_origins=["https://rdc-mcp-server.onrender.com"],
+)
+mcp = FastMCP(
+    SERVICE_NAME,
+    stateless_http=True,
+    json_response=True,
+    transport_security=transport_security,
+)
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -146,14 +156,7 @@ async def termux_approved_operations() -> dict[str, Any]:
 
 
 # Streamable HTTP endpoint is provided by the MCP SDK at /mcp.
-# Render terminates public HTTPS and forwards the service Host header; explicitly
-# allow only this service's public hostname rather than the SDK localhost default.
-transport_security = TransportSecuritySettings(
-    enable_dns_rebinding_protection=True,
-    allowed_hosts=["rdc-mcp-server.onrender.com", "rdc-mcp-server.onrender.com:*"],
-    allowed_origins=["https://rdc-mcp-server.onrender.com"],
-)
-app = mcp.streamable_http_app(transport_security=transport_security)
+app = mcp.streamable_http_app()
 app.add_middleware(BearerAuthMiddleware)
 
 
