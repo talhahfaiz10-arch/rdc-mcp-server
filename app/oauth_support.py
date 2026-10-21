@@ -45,7 +45,7 @@ def valid_redirect(uri: str) -> bool:
 class OAuthBearerAuthMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         path = request.url.path.rstrip("/") or "/"
-        public = {"/", "/health", "/.well-known/oauth-protected-resource", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"}
+        public = {"/", "/health", "/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp", "/.well-known/oauth-authorization-server", "/register", "/authorize", "/token"}
         if path in public or path in ("/relay/agent/next", "/relay/agent/result"):
             return await call_next(request)
         h = request.headers.get("authorization", "")
@@ -53,7 +53,7 @@ class OAuthBearerAuthMiddleware(BaseHTTPMiddleware):
         # Keep existing private token available for manual recovery, too.
         legacy = bool(MASTER_SECRET) and hmac.compare_digest(token, MASTER_SECRET)
         if not (legacy or valid_token(token)):
-            return JSONResponse({"error":"unauthorized"}, status_code=401, headers={"WWW-Authenticate": f'Bearer resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource"'})
+            return JSONResponse({"error":"unauthorized"}, status_code=401, headers={"WWW-Authenticate": f'Bearer resource_metadata="{BASE_URL}/.well-known/oauth-protected-resource/mcp"'})
         return await call_next(request)
 
 async def protected_resource(request: Request):
@@ -111,6 +111,7 @@ async def token(request: Request):
 
 def install_oauth(app):
     app.add_route("/.well-known/oauth-protected-resource", protected_resource, methods=["GET"])
+    app.add_route("/.well-known/oauth-protected-resource/mcp", protected_resource, methods=["GET"])
     app.add_route("/.well-known/oauth-authorization-server", auth_metadata, methods=["GET"])
     app.add_route("/register", register, methods=["POST"])
     app.add_route("/authorize", authorize, methods=["GET","POST"])
