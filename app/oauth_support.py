@@ -59,7 +59,7 @@ async def protected_resource(request: Request):
     return JSONResponse({"resource":RESOURCE,"authorization_servers":[BASE_URL],"scopes_supported":["mcp:tools"],"bearer_methods_supported":["header"]})
 
 async def auth_metadata(request: Request):
-    return JSONResponse({"issuer":BASE_URL,"authorization_endpoint":BASE_URL+"/authorize","token_endpoint":BASE_URL+"/token","registration_endpoint":BASE_URL+"/register","response_types_supported":["code"],"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"scopes_supported":["mcp:tools"]})
+    return JSONResponse({"issuer":BASE_URL,"authorization_response_iss_parameter_supported":True,"authorization_endpoint":BASE_URL+"/authorize","token_endpoint":BASE_URL+"/token","registration_endpoint":BASE_URL+"/register","response_types_supported":["code"],"grant_types_supported":["authorization_code"],"code_challenge_methods_supported":["S256"],"token_endpoint_auth_methods_supported":["none"],"scopes_supported":["mcp:tools"]})
 
 async def register(request: Request):
     try: b = await request.json()
@@ -100,35 +100,75 @@ async def authorize(request: Request):
     if request.method == "GET":
         v = dict(request.query_params)
     else:
-        v = {k: vals[0] for k, vals in parse_qs((await request.body()).decode(),keep_blank_values=True).items()}
-    cid, uri = str(v.get("client_id","")), str(v.get("redirect_uri",""))
+        v = {k: vals[0] for k, vals in parse_qs((await request.body()).decode(), keep_blank_values=True).items()}
+
+    cid = str(v.get("client_id", ""))
+    uri = str(v.get("redirect_uri", ""))
+    state = str(v.get("state", ""))
     c = client_info(cid)
-    if not c or uri not in c["uris"]: return HTMLResponse("<h2>Invalid client or redirect URI</h2>",status_code=400)
+
+    # Never redirect to an unregistered URI. Once the client and URI are trusted,
+    # all OAuth authorization responses include the exact issuer identifier.
+    if not c or uri not in c["uris"]:
+        return HTMLResponse("<h2>Invalid client or redirect URI</h2>", status_code=400)
+
+    def oauth_redirect_error(error: str, description: str = ""):
+        params = {"error": error, "iss": BASE_URL}
+        if state:
+            params["state"] = state
+        if description:
+            params["error_description"] = description
+        return RedirectResponse(uri + ("&" if "?" in uri else "?") + urlencode(params), status_code=302)
+
+    if v.get("response_type") != "code":
+        return oauth_redirect_error("unsupported_response_type", "Only response_type=code is supported.")
+    if v.get("code_challenge_method") != "S256" or not v.get("code_challenge"):
+        return oauth_redirect_error("invalid_request", "A PKCE S256 code challenge is required.")
+    if v.get("resource") != RESOURCE:
+        return oauth_redirect_error("invalid_target", "The resource parameter must identify this MCP server.")
+    requested_scopes = set(str(v.get("scope", "mcp:tools")).split())
+    if not requested_scopes or not requested_scopes.issubset({"mcp:tools"}):
+        return oauth_redirect_error("invalid_scope", "The requested scope is not supported.")
+
     if request.method == "GET":
-        hidden = "".join(f'<input type="hidden" name="{k}" value="{safe(str(v.get(k,"")))}">' for k in ("client_id","redirect_uri","state","code_challenge","code_challenge_method","resource","scope","response_type"))
+        hidden = "".join(
+            f'<input type="hidden" name="{k}" value="{safe(str(v.get(k, "")))}">'
+            for k in ("client_id", "redirect_uri", "state", "code_challenge", "code_challenge_method", "resource", "scope", "response_type")
+        )
         return HTMLResponse(f"""<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Authorize Termux Recovery</title><main style="font:16px system-ui;max-width:440px;margin:40px auto;padding:20px"><h2>Authorize Termux Recovery</h2><p>{safe(c['name'])} requests read-only Termux status tools.</p><form method="post" action="/authorize">{hidden}<label>Username</label><input name="username" value="termux" required style="display:block;width:100%;padding:12px;margin:8px 0"><label>Termux MCP secret</label><input type="password" name="password" required style="display:block;width:100%;padding:12px;margin:8px 0"><button style="padding:12px">Authorize read-only tools</button></form><p>Arbitrary shell execution is disabled.</p></main>""")
-    if not MASTER_SECRET or v.get("username") != "termux" or not hmac.compare_digest(str(v.get("password","")),MASTER_SECRET):
-        return HTMLResponse("<h2>Login failed</h2><p>Return to the connection setup and try again.</p>",status_code=401)
-    if v.get("code_challenge_method") != "S256" or not v.get("code_challenge") or v.get("resource",RESOURCE) != RESOURCE:
-        return JSONResponse({"error":"invalid_request"},status_code=400)
+
+    if not MASTER_SECRET or v.get("username") != "termux" or not hmac.compare_digest(str(v.get("password", "")), MASTER_SECRET):
+        return oauth_redirect_error("access_denied", "User authentication failed or authorization was denied.")
+
     code = secrets.token_urlsafe(32)
-    _codes[code] = {"cid":cid,"uri":uri,"challenge":v["code_challenge"],"state":v.get("state",""),"exp":time.time()+300}
-    q={"code":code}
-    if v.get("state"): q["state"]=v["state"]
-    return RedirectResponse(uri+("&" if "?" in uri else "?")+urlencode(q),status_code=302)
+    _codes[code] = {"cid": cid, "uri": uri, "challenge": v["code_challenge"], "state": state,
+                    "resource": RESOURCE, "scope": "mcp:tools", "exp": time.time() + 300}
+    q = {"code": code, "iss": BASE_URL}
+    if state:
+        q["state"] = state
+    return RedirectResponse(uri + ("&" if "?" in uri else "?") + urlencode(q), status_code=302)
+
 
 async def token(request: Request):
-    v = {k: vals[0] for k, vals in parse_qs((await request.body()).decode(),keep_blank_values=True).items()}
-    if v.get("grant_type") != "authorization_code": return JSONResponse({"error":"unsupported_grant_type"},status_code=400)
-    c = _codes.pop(v.get("code",""),None)
-    if not c or c["exp"] < time.time() or v.get("client_id") != c["cid"] or v.get("redirect_uri") != c["uri"] or v.get("resource",RESOURCE) != RESOURCE:
-        return JSONResponse({"error":"invalid_grant"},status_code=400)
-    verifier = v.get("code_verifier","")
+    v = {k: vals[0] for k, vals in parse_qs((await request.body()).decode(), keep_blank_values=True).items()}
+    if v.get("grant_type") != "authorization_code":
+        return JSONResponse({"error": "unsupported_grant_type"}, status_code=400, headers={"Cache-Control": "no-store"})
+    code = v.get("code", "")
+    c = _codes.get(code)
+    if (not c or c["exp"] < time.time() or v.get("client_id") != c["cid"]
+            or v.get("redirect_uri") != c["uri"] or v.get("resource") != RESOURCE
+            or c.get("resource") != RESOURCE):
+        return JSONResponse({"error": "invalid_grant"}, status_code=400, headers={"Cache-Control": "no-store"})
+    verifier = v.get("code_verifier", "")
     if not verifier or enc(hashlib.sha256(verifier.encode()).digest()) != c["challenge"]:
-        return JSONResponse({"error":"invalid_grant"},status_code=400)
-    now=int(time.time())
-    access=issue({"iss":BASE_URL,"aud":RESOURCE,"sub":c["cid"],"scope":"mcp:tools","iat":now,"exp":now+TTL})
-    return JSONResponse({"access_token":access,"token_type":"Bearer","expires_in":TTL,"scope":"mcp:tools"},headers={"Cache-Control":"no-store","Pragma":"no-cache"})
+        return JSONResponse({"error": "invalid_grant"}, status_code=400, headers={"Cache-Control": "no-store"})
+    # Consume only after every exchange parameter and PKCE verifier is valid.
+    _codes.pop(code, None)
+    now = int(time.time())
+    access = issue({"iss": BASE_URL, "aud": RESOURCE, "sub": c["cid"], "scope": c["scope"], "iat": now, "exp": now + TTL})
+    return JSONResponse({"access_token": access, "token_type": "Bearer", "expires_in": TTL, "scope": c["scope"]},
+                         headers={"Cache-Control": "no-store", "Pragma": "no-cache"})
+
 
 def install_oauth(app):
     app.add_route("/.well-known/oauth-protected-resource", protected_resource, methods=["GET"])
